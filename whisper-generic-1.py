@@ -1,3 +1,4 @@
+# %%
 !pip install datasets>=2.6.1
 !pip install librosa
 !pip install evaluate>=0.30
@@ -7,6 +8,7 @@
 !pip install -q git+https://github.com/huggingface/transformers.git@main git+https://github.com/huggingface/peft.git@main
 !pip install https://github.com/jllllll/bitsandbytes-windows-webui/releases/download/wheels/bitsandbytes-0.41.1-py3-none-win_amd64.whl
 
+# %%
 import os, evaluate, torch, gc, numpy as np
 from datasets import (
     load_dataset,
@@ -56,6 +58,7 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 
+# %%
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 model_name_or_path = ""
 language = ""
@@ -65,28 +68,49 @@ dbn_a = ""
 dbn_b = ""
 dbn_c = ""
 
+# %%
 rd = IterableDatasetDict()
 
 db1 = load_dataset(dbn_a, "", split="train", token=True, trust_remote_code=True, streaming=True)
 db2 = load_dataset(dbn_b, "", split="train", token=True, trust_remote_code=True, streaming=True)
 db3 = load_dataset(dbn_c, "", split="train", token=True, trust_remote_code=True, streaming=True)
 
-db1 = db1.cast(db2.features)
-db3 = db3.cast(db1.features)
+db1 = db1.cast_column("audio", Audio(sampling_rate=16000))
+db2 = db2.cast_column("audio", Audio(sampling_rate=16000))
+db3 = db3.cast_column("audio", Audio(sampling_rate=16000))
+
+db1 = db1.remove_columns([])
+db2 = db2.remove_columns([])
+db3 = db3.remove_columns([])
+
+db1 = db1.rename_column("", "")
+db2 = db2.rename_column("", "")
+db3 = db3.rename_column("", "")
+
+rd["train"] = concatenate_datasets([db1, db2, db3])
+rd["test"] = load_dataset("mozilla-foundation/common_voice_16_1", "ja", split="test", token=True, trust_remote_code=True, streaming=True)
+
+# no casting
+#db1 = db1.cast(db2.features)
+#db3 = db3.cast(db1.features)
 
 rd["train"] = concatenate_datasets([db1, db2, db3])
 rd["test"] = load_dataset(dbn_a, "", split="test", token=True, trust_remote_code=True, streaming=True)
 
+# %%
 feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name_or_path)
 tokenizer = WhisperTokenizer.from_pretrained(model_name_or_path, language=language_abbr, task=task)
 processor = WhisperProcessor.from_pretrained(model_name_or_path, language=language, task=task)
 
+# %%
 rd = rd.cast_column("audio", Audio(sampling_rate=16000))
 
+# %%
 do_lower_case = False
 do_remove_punctuation = False
 normalizer = BasicTextNormalizer()
 
+# %%
 def prepare_dataset(batch):
     audio = batch["audio"]
     batch["input_features"] = processor.feature_extractor(audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
@@ -100,15 +124,18 @@ def prepare_dataset(batch):
     batch["labels"] = processor.tokenizer(transcription).input_ids
     return batch
 
+# %%
 rd["train"] = rd["train"].shuffle(
     buffer_size=500,
     seed=0,
 )
 
+# %%
 max_input_length = 30.0
 def is_audio_in_length_range(length):
     return length < max_input_length
 
+# %%
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
@@ -125,10 +152,13 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         batch["labels"] = labels
         return batch
 
+# %%
 data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor)
 
+# %%
 metric = evaluate.load("wer")
 
+# %%
 def compute_metrics(pred):
     pred_ids = pred.predictions
     label_ids = pred.label_ids
@@ -138,18 +168,23 @@ def compute_metrics(pred):
     wer = 100 * metric.compute(predictions=pred_str, references=label_str)
     return {"wer": wer}
 
+# %%
 model = WhisperForConditionalGeneration.from_pretrained(model_name_or_path, load_in_8bit=True, device_map="auto")
 
+# %%
 def make_inputs_require_grad(module, input, output):
     output.requires_grad_(True)
 model.model.encoder.conv1.register_forward_hook(make_inputs_require_grad)
 
+# %%
 config = LoraConfig(r=32, lora_alpha=64, target_modules=["q_proj", "v_proj"], lora_dropout=0.05, bias="none")
 model = get_peft_model(model, config)
 model.print_trainable_parameters()
 
+# %%
 vd = rd.map(prepare_dataset, remove_columns=list(next(iter(rd.values())).features)).with_format("torch")
 
+# %%
 training_args = Seq2SeqTrainingArguments(
     output_dir="",  
     push_to_hub=False,
@@ -173,6 +208,7 @@ training_args = Seq2SeqTrainingArguments(
     logging_dir='logs',
 )
 
+# %%
 class SavePeftModelCallback(TrainerCallback):
     def on_save(
         self,
@@ -200,15 +236,19 @@ trainer = Seq2SeqTrainer(
 )
 model.config.use_cache = True
 
+# %%
 model.save_pretrained("")
 tokenizer.save_pretrained('')
 processor.save_pretrained("")
 
+# %%
 trainer.train()
 
+# %%
 peft_model_id = ""
 model.push_to_hub(peft_model_id)
 
+# %%
 peft_model_id = "" 
 peft_config = PeftConfig.from_pretrained(peft_model_id)
 model = WhisperForConditionalGeneration.from_pretrained(
@@ -218,6 +258,7 @@ model = WhisperForConditionalGeneration.from_pretrained(
 model = PeftModel.from_pretrained(model, peft_model_id)
 model.config.use_cache = True
 
+# %%
 eval_dataloader = DataLoader(common_voice["test"], batch_size=8, collate_fn=data_collator)
 forced_decoder_ids = processor.get_decoder_prompt_ids(language=language, task=task)
 normalizer = BasicTextNormalizer()
@@ -257,6 +298,7 @@ eval_metrics = {"eval/wer": wer, "eval/normalized_wer": normalized_wer}
 print(f"{wer=} and {normalized_wer=}")
 print(eval_metrics)
 
+# %%
 # For merging adapter and model
 
 import torch
@@ -301,5 +343,60 @@ merged_model.save_pretrained("merged_model")
 model.save_pretrained("")
 model.push_to_hub("")
 
+# %% [markdown]
+# from transformers import (
+#     AutomaticSpeechRecognitionPipeline,
+#     WhisperForConditionalGeneration,
+#     WhisperTokenizer,
+#     WhisperProcessor,
+# )
+# from peft import PeftModel, PeftConfig
+# 
+# peft_model_id = "sin2piusc/whisper-medium-3L-JP" # Use the same model ID as before.
+# language = "ja"
+# task = "transcribe"
+# peft_config = PeftConfig.from_pretrained(peft_model_id)
+# model = WhisperForConditionalGeneration.from_pretrained(
+#     peft_config.base_model_name_or_path, load_in_8bit=True, device_map="auto"
+# )
+# 
+# model = PeftModel.from_pretrained(model, peft_model_id)
+# tokenizer = WhisperTokenizer.from_pretrained(peft_config.base_model_name_or_path, language=language, task=task)
+# processor = WhisperProcessor.from_pretrained(peft_config.base_model_name_or_path, language=language, task=task)
+# feature_extractor = processor.feature_extractor
+# forced_decoder_ids = processor.get_decoder_prompt_ids(language=language, task=task)
+# pipe = AutomaticSpeechRecognitionPipeline(model=model, tokenizer=tokenizer, feature_extractor=feature_extractor)
+# 
+# 
+# def transcribe(audio):
+#     with torch.cuda.amp.autocast():
+#         text = pipe(audio, generate_kwargs={"forced_decoder_ids": forced_decoder_ids}, max_new_tokens=255)["text"]
+#     return text
+# 
+# transcribe("a.mp3")
+
+# %% [markdown]
+# from datetime import timedelta
+# import os
+# import whisper
+# 
+# def transcribe_audio(path):
+#     model = whisper.load_model("whisper-medium-3L-JP-MERGED") # Change this to your desired model
+#     print("Whisper model loaded.")
+#     transcribe = model.transcribe(audio=path)
+#     segments = transcribe['segments']
+# 
+#     for segment in segments:
+#         startTime = str(0)+str(timedelta(seconds=int(segment['start'])))+',000'
+#         endTime = str(0)+str(timedelta(seconds=int(segment['end'])))+',000'
+#         text = segment['text']
+#         segmentId = segment['id']+1
+#         segment = f"{segmentId}\n{startTime} --> {endTime}\n{text[1:] if text[0] is ' ' else text}\n\n"
+# 
+#         srtFilename = os.path.join("SrtFiles", f"VIDEO_FILENAME.srt")
+#         with open(srtFilename, 'a', encoding='utf-8') as srtFile:
+#             srtFile.write(segment)
+# 
+#     return srtFilename
 
 
